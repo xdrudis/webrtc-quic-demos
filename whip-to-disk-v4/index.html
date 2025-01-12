@@ -1,0 +1,288 @@
+<html>
+<head>
+  <title>whip-whep</title>
+  <style>
+    .stats-container {
+      margin: 20px 0;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .stats-item {
+      margin: 5px 0;
+      font-family: monospace;
+    }
+  </style>
+</head>
+
+<body>
+<div>
+  <label for="codecSelect">Select Video Codec:</label>
+  <select id="codecSelect"></select>
+</div>
+<button onclick="window.doWHIP()">Publish</button>
+<h3>Video</h3>
+<video id="videoPlayer" autoplay muted controls style="width: 500px"></video>
+
+<h3>Stream Statistics</h3>
+<div id="statsDisplay" class="stats-container">
+  <div id="codecStats" class="stats-item">Codec: Not connected</div>
+  <div id="bitrateStats" class="stats-item">Bitrate: 0 kbps</div>
+  <div id="resolutionStats" class="stats-item">Source Resolution: N/A</div>
+  <div id="actualResolutionStats" class="stats-item">Transmitted Resolution: N/A</div>
+  <div id="framerateStats" class="stats-item">Framerate: 0 fps</div>
+  <div id="packetsStats" class="stats-item">Packets sent: 0</div>
+</div>
+
+<h3>ICE Connection States</h3>
+<div id="iceConnectionStates"></div><br />
+</body>
+
+<script>
+  let peerConnection = new RTCPeerConnection();
+  let statsInterval;
+  let lastBytesSent = 0;
+  let lastTimestamp = 0;
+
+  // Function to get supported codecs
+  async function getSupportedCodecs() {
+    const knownCodecs = new Set(['vp8', 'vp9', 'h264', 'av1']);
+    const codecs = new Set();
+
+    const capabilities = RTCRtpSender.getCapabilities('video');
+    if (capabilities && capabilities.codecs) {
+      capabilities.codecs.forEach(codec => {
+        const codecName = codec.mimeType.split('/')[1].toLowerCase();
+        if (codec.mimeType.startsWith('video/') && knownCodecs.has(codecName)) {
+          codecs.add(codecName);
+        }
+      });
+    }
+
+    return Array.from(codecs);
+  }
+
+  // Initialize codec dropdown
+  async function initializeCodecDropdown() {
+    const codecSelect = document.getElementById('codecSelect');
+    const codecs = await getSupportedCodecs();
+
+    codecs.forEach(codec => {
+      const option = document.createElement('option');
+      option.value = codec;
+      option.text = codec.toUpperCase();
+      codecSelect.appendChild(option);
+    });
+  }
+
+  async function getAndDisplayStats() {
+    try {
+      const stats = await peerConnection.getStats();
+      let foundVideo = false;
+
+      for (const report of stats.values()) {
+        if (report.type === 'outbound-rtp' && report.mediaType === 'video') {
+          foundVideo = true;
+
+          // Update codec info
+          if (report.codecId) {
+            const codec = stats.get(report.codecId);
+            if (codec?.mimeType) {
+              document.getElementById('codecStats').textContent =
+                      `Codec: ${codec.mimeType.split('/')[1].toUpperCase()} (${codec.payloadType})`;
+            }
+          }
+
+          // Calculate and display bitrate
+          if (lastTimestamp && lastBytesSent) {
+            const bitrateKbps = (8 * (report.bytesSent - lastBytesSent)) / (report.timestamp - lastTimestamp)
+            if (bitrateKbps) {
+              document.getElementById('bitrateStats').textContent = `Bitrate: ${Math.floor(bitrateKbps)} kbps`;
+            }
+          }
+          lastBytesSent = report.bytesSent;
+          lastTimestamp = report.timestamp;
+
+          // Update packets info
+          document.getElementById('packetsStats').textContent =
+                  `Packets sent: ${report.packetsSent || 0} (lost: ${report.packetsLost || 0})`;
+
+          // Update resolution
+          if (report.frameWidth && report.frameHeight) {
+            document.getElementById('actualResolutionStats').textContent =
+                    `Transmitted Resolution: ${report.frameWidth}x${report.frameHeight}`;
+          }
+        } else if (report.type === 'media-source' && report.kind === 'video') {
+          // Update source resolution and framerate
+          const width = report.width || 'N/A';
+          const height = report.height || 'N/A';
+          document.getElementById('resolutionStats').textContent =
+                  `Resolution: ${width}x${height}`;
+          document.getElementById('framerateStats').textContent =
+                  `Framerate: ${report.framesPerSecond || 0} fps`;
+        }
+      }
+
+      if (!foundVideo) {
+        console.log('No outbound video stats found');
+      }
+    } catch (error) {
+      console.error('Error getting stats:', error);
+    }
+  }
+
+  // Initialize dropdown when page loads
+  initializeCodecDropdown();
+
+  peerConnection.oniceconnectionstatechange = () => {
+    const el = document.createElement('p');
+    el.appendChild(document.createTextNode(peerConnection.iceConnectionState));
+    document.getElementById('iceConnectionStates').appendChild(el);
+
+    if (peerConnection.iceConnectionState === 'connected') {
+      statsInterval = setInterval(getAndDisplayStats, 1000);
+    } else if (
+            peerConnection.iceConnectionState === 'disconnected' ||
+            peerConnection.iceConnectionState === 'failed'
+    ) {
+      if (statsInterval) {
+        clearInterval(statsInterval);
+      }
+    }
+  };
+
+  window.doWHIP = () => {
+    if (statsInterval) {
+      clearInterval(statsInterval);
+    }
+
+    const selectedCodec = document.getElementById('codecSelect').value;
+
+    const transceiver = peerConnection.addTransceiver('video', {
+      direction: 'sendonly',
+      sendEncodings: [{
+        maxBitrate: 2500000,
+        scaleResolutionDownBy: 1.0,
+        maxFramerate: 30,
+        // active: true,
+        // networkPriority: 'high',
+        // priority: 'high'
+      }],
+      // Add explicit video constraints here
+      offerToReceiveVideo: true,
+      sendParameters: {
+        degradationPreference: 'maintain-resolution',
+        encodings: [{
+          minResolution: { width: 1280, height: 720 },
+          maxResolution: { width: 1920, height: 1080 }
+        }]
+      }
+    });
+
+    if (selectedCodec) {
+      const capabilities = RTCRtpSender.getCapabilities('video');
+      let preferredCodecs = [];
+
+      if (selectedCodec.toLowerCase() === 'h264') {
+        preferredCodecs = capabilities.codecs.filter(codec =>
+                codec.mimeType.toLowerCase() === 'video/h264' &&
+                (
+                        !codec.sdpFmtpLine ||
+                        (
+                                codec.sdpFmtpLine.includes('profile-level-id=42001f') &&
+                                codec.sdpFmtpLine.includes('packetization-mode=1')
+                        )
+                )
+        );
+
+        const rtxCodecs = capabilities.codecs.filter(codec =>
+                codec.mimeType.toLowerCase() === 'video/rtx' &&
+                preferredCodecs.some(h264Codec =>
+                        codec.sdpFmtpLine && codec.sdpFmtpLine.includes(`apt=${h264Codec.payloadType}`)
+                )
+        );
+        preferredCodecs = [...preferredCodecs, ...rtxCodecs];
+      } else {
+        preferredCodecs = capabilities.codecs.filter(codec =>
+                codec.mimeType.toLowerCase() === `video/${selectedCodec.toLowerCase()}`
+        );
+      }
+
+      if (preferredCodecs.length > 0) {
+        transceiver.setCodecPreferences(preferredCodecs);
+      }
+    }
+
+    navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { exact: 1280 },
+        height: { exact: 720 }
+      },
+      audio: false
+    }).then(stream => {
+      document.getElementById('videoPlayer').srcObject = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+
+      // Set track constraints again to ensure they stick
+      videoTrack.applyConstraints({
+        width: { min: 1280, ideal: 1280, max: 1280 },
+        height: { min: 720, ideal: 720, max: 720 },
+        aspectRatio: { exact: 16/9 },
+        frameRate: { min: 30, ideal: 30 }
+      });
+
+      stream.getTracks().forEach(async track => {
+        const videoTrack = stream.getVideoTracks()[0];
+
+        // Double-check the constraints were applied
+        const settings = videoTrack.getSettings();
+        // console.log('Track settings:', settings);
+
+        if (settings.width !== 1280 || settings.height !== 720) {
+          console.warn('Could not get exact 1280x720, trying to force it...');
+          await videoTrack.applyConstraints({
+            width: { exact: 1280 },
+            height: { exact: 720 },
+            aspectRatio: { exact: 16/9 }
+          });
+        } else {
+          console.log('successful 1280x720')
+        }
+
+        const sender = peerConnection.addTrack(track, stream);
+        if (track.kind === 'video') {
+          const params = sender.getParameters();
+          if (!params.encodings) {
+            params.encodings = [{}];
+          }
+          params.encodings[0].scaleResolutionDownBy = 1.0; // Force 1:1 resolution
+          // params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps
+          await sender.setParameters(params)
+
+          if (statsInterval) clearInterval(statsInterval);
+          statsInterval = setInterval(getAndDisplayStats, 1000);
+        }
+      });
+
+      peerConnection.createOffer().then(offer => {
+        peerConnection.setLocalDescription(offer);
+
+        fetch(`/whip`, {
+          method: 'POST',
+          body: offer.sdp,
+          headers: {
+            Authorization: `Bearer none`,
+            'Content-Type': 'application/sdp'
+          }
+        }).then(r => r.text())
+        .then(answer => {
+          peerConnection.setRemoteDescription({
+            sdp: answer,
+            type: 'answer'
+          });
+        });
+      });
+    });
+  }
+</script>
+</html>
