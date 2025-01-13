@@ -1,0 +1,227 @@
+<html>
+<head>
+  <title>whep-only</title>
+  <style>
+    .stats-container {
+      margin: 20px 0;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .stats-item {
+      margin: 5px 0;
+      font-family: monospace;
+    }
+  </style>
+</head>
+
+<body>
+<button onclick="window.doWHEP()">Subscribe</button>
+<h3>Video</h3>
+<video id="videoPlayer" autoplay controls style="width: 500px"></video>
+
+<h3>Stream Statistics</h3>
+<div id="statsDisplay" class="stats-container">
+  <div id="codecStats" class="stats-item">Codec: Not connected</div>
+  <div id="bitrateStats" class="stats-item">Bitrate: 0 kbps</div>
+  <div id="resolutionStats" class="stats-item">Resolution: N/A</div>
+  <div id="framerateStats" class="stats-item">Framerate: 0 fps</div>
+  <div id="packetsStats" class="stats-item">Packets received: 0</div>
+  <div id="jitterStats" class="stats-item">Jitter: 0 ms</div>
+</div>
+
+<h3>ICE Connection States</h3>
+<div id="iceConnectionStates"></div><br />
+</body>
+
+<script>
+  let peerConnection = new RTCPeerConnection();
+  let statsInterval;
+  let lastBytesReceived = 0;
+  let lastTimestamp = 0;
+
+  async function getAndDisplayStats() {
+    try {
+      const stats = await peerConnection.getStats();
+      let foundVideo = false;
+
+      for (const report of stats.values()) {
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          foundVideo = true;
+
+          // Update codec info
+          if (report.codecId) {
+            const codec = stats.get(report.codecId);
+            if (codec?.mimeType) {
+              document.getElementById('codecStats').textContent =
+                      `Codec: ${codec.mimeType.split('/')[1].toUpperCase()} (${codec.payloadType})`;
+            }
+          }
+
+          // Calculate and display bitrate
+          if (lastTimestamp && lastBytesReceived) {
+            const bitrateKbps = (8 * (report.bytesReceived - lastBytesReceived)) /
+                    (report.timestamp - lastTimestamp);
+            if (bitrateKbps) {
+              document.getElementById('bitrateStats').textContent =
+                      `Bitrate: ${Math.floor(bitrateKbps)} kbps`;
+            }
+          }
+          lastBytesReceived = report.bytesReceived;
+          lastTimestamp = report.timestamp;
+
+          // Update packets info
+          document.getElementById('packetsStats').textContent =
+                  `Packets received: ${report.packetsReceived || 0} (lost: ${report.packetsLost || 0})`;
+
+          // Update resolution
+          if (report.frameWidth && report.frameHeight) {
+            document.getElementById('resolutionStats').textContent =
+                    `Resolution: ${report.frameWidth}x${report.frameHeight}`;
+          }
+
+          // Update framerate
+          if (report.framesPerSecond) {
+            document.getElementById('framerateStats').textContent =
+                    `Framerate: ${Math.round(report.framesPerSecond)} fps`;
+          }
+
+          // Update jitter
+          if (report.jitter) {
+            document.getElementById('jitterStats').textContent =
+                    `Jitter: ${Math.round(report.jitter * 1000)} ms`;
+          }
+        }
+      }
+
+      if (!foundVideo) {
+        console.log('No inbound video stats found');
+      }
+    } catch (error) {
+      console.error('Error getting stats:', error);
+    }
+  }
+
+  peerConnection.oniceconnectionstatechange = () => {
+    const el = document.createElement('p');
+    el.appendChild(document.createTextNode(peerConnection.iceConnectionState));
+    document.getElementById('iceConnectionStates').appendChild(el);
+
+    if (peerConnection.iceConnectionState === 'connected') {
+      statsInterval = setInterval(getAndDisplayStats, 1000);
+    } else if (
+            peerConnection.iceConnectionState === 'disconnected' ||
+            peerConnection.iceConnectionState === 'failed'
+    ) {
+      if (statsInterval) {
+        clearInterval(statsInterval);
+      }
+    }
+  };
+
+  window.doWHEP = () => {
+    if (statsInterval) {
+      clearInterval(statsInterval);
+    }
+
+    const transceiver = peerConnection.addTransceiver('video', {
+      direction: 'recvonly'
+    });
+
+    // Log transceiver information
+    console.log('Transceiver created:', {
+      direction: transceiver.direction,
+      currentDirection: transceiver.currentDirection,
+      mid: transceiver.mid
+    });
+
+    if (transceiver.receiver) {
+      console.log('Initial receiver track:', transceiver.receiver.track);
+    }
+
+    peerConnection.ontrack = async function(event) {
+      console.log('Track received:', event);
+      const videoElement = document.getElementById('videoPlayer');
+      videoElement.srcObject = event.streams[0];
+
+      // Add more detailed event monitoring
+      videoElement.onerror = (e) => {
+        console.error('Video element error:', videoElement.error);
+      };
+
+      try {
+        // Ensure we attempt to play as soon as we have enough data
+        await videoElement.play();
+        console.log('Autoplay started successfully');
+      } catch (error) {
+        console.warn('Autoplay failed:', error);
+        // If autoplay fails, we're already muted so this shouldn't happen
+        // but just in case, we can try to recover
+        try {
+          videoElement.muted = true;
+          await videoElement.play();
+          console.log('Autoplay recovered with muted playback');
+        } catch (mutedError) {
+          console.error('Even muted autoplay failed:', mutedError);
+        }
+      }
+      videoElement.onloadedmetadata = () => {
+        console.log('Video metadata loaded', {
+          videoWidth: videoElement.videoWidth,
+          videoHeight: videoElement.videoHeight,
+          readyState: videoElement.readyState
+        });
+      };
+
+      videoElement.onplay = () => {
+        console.log('Video playback started');
+      };
+
+      // Monitor the track directly
+      const track = event.track;
+      console.log('Track settings:', track.getSettings());
+
+      track.onmute = () => console.log('Track muted');
+      track.onunmute = () => console.log('Track unmuted');
+      track.onended = () => console.log('Track ended');
+
+      // Monitor the MediaStream
+      const stream = event.streams[0];
+      stream.onremovetrack = () => console.log('Track removed from stream');
+      stream.onaddtrack = () => console.log('Track added to stream');
+    };
+
+    peerConnection.createOffer()
+            .then(offer => {
+              console.log('Created offer:', offer);
+              return peerConnection.setLocalDescription(offer);
+            })
+            .then(() => {
+              return fetch(`/whep`, {
+                method: 'POST',
+                body: peerConnection.localDescription.sdp,
+                headers: {
+                  Authorization: `Bearer none`,
+                  'Content-Type': 'application/sdp'
+                }
+              });
+            })
+            .then(r => {
+              if (!r.ok) {
+                throw new Error(`HTTP error! status: ${r.status}`);
+              }
+              return r.text();
+            })
+            .then(answer => {
+              console.log('Received answer:', answer);
+              return peerConnection.setRemoteDescription({
+                sdp: answer,
+                type: 'answer'
+              });
+            })
+            .catch(err => {
+              console.error('WHEP setup error:', err);
+            });
+  };
+</script>
+</html>
